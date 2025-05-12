@@ -213,7 +213,19 @@ class SMORE(GeneralRecommender):
             image_embedding: 图像embedding, image_embedding.shape: torch.Size([7050, 64]) 
             text_embedding: 文本embedding, text_embedding.shape: torch.Size([7050, 64]), 7050个物品,每个物品编码为64维向量
         Function:
-            对图像和文本嵌入进行多模态多尺度小波变换对齐
+            对图像和文本嵌入进行多模态多尺度小波变换对齐：
+            Steps1: 选取模态领域适应的合适小波基['harr', 'db1-20', 'bior1.3'], 选择高通滤波器的下采样分级尺度level,本文默认选择level3, 注意输入的特征向量是一维度，因此暂时不考虑水平、垂直、对角。
+            Steps2: 获取图像模态特征的image_coeffs（一个低通分量，三个高通分量）；文本模态特征的text_coeffs（一个低通分量，三个高通分量）
+            Steps3: 多模态多尺度频域空间对齐：
+                    3.1低频信号对齐
+                    1.对于低频信号（第 3 级水平低频分量），首先对图像模态和文本模态下的低频信号分别进行LoRA(奇异值分解（SVD）),去除冗余信息，保留主要特征。 
+                    2.然后,再分别对进行归一化，对图像低频信号，可将其像素值归一化到特定范围，如 [0, 1] 或 [-1, 1]，以消除不同图像之间的亮度差异等影响。 对于文本低频信号，可对词向量或特征向量进行归一化，使不同文本的特征具有可比性，例如采用 L2 归一化。
+                    3.然后再将LoRa和归一化后的两个模态的特征向量进行对齐， 生成一个新的融合模态第 3 级水平低频分量
+                    3.高频信号多尺度对齐
+                        1.对图像和文本的第 3 级水平高频分量进行对齐，生成一个新的融合模态第 3 级水平高频分量
+                        2.对图像和文本的第 2 级水平高频分量进行对齐， 生成一个新的融合模态第 2 级水平高频分量
+                        3.对图像和文本的第 1 级水平高频分量分别先进行去噪，再进行对齐， 生成一个新的融合模态第 1 级水平高频分量
+
         Returns:
             image_embedding_wave.shape: torch.Size([7050, 64]) text_embedding_wave.shape: torch.Size([7050, 64]) fusion_wave.shape: torch.Size([7050, 64])
         '''
@@ -223,12 +235,25 @@ class SMORE(GeneralRecommender):
 
         # 定义小波类型
         wavelet = 'db4'
-        level = 3
+        level = 3 
 
         # 对图像和文本嵌入进行小波变换
+        '''
+        原始信号 如果输入是 (256, 256) 的图像，axis=1（水平方向分解），level=3：
+│
+        ├── cA3（最低频，最模糊的近似）      主体信号，轮廓 （保留）  (256, 32)  第 3 级水平低频分量
+        │
+        ├── cD3（第3级细节，较大尺度的高频） 大尺度边缘 最精细的细节信息 (256, 32) 第 3 级水平高频分量
+        │
+        ├── cD2（第2级细节，中等尺度的高频） 中尺度细节，更细微的边缘和纹理变化 (256, 64) 第 2 级水平高频分量
+        │
+        └── cD1（第1级细节，最细尺度的高频） 高频噪声->去噪 (256, 128) 第 1 级水平高频分量
+        '''
         image_coeffs = pywt.wavedec(image_np, wavelet, level=level, axis=1)
         text_coeffs = pywt.wavedec(text_np, wavelet, level=level, axis=1)
 
+        # len(image_coeffs): 4 len(text_coeffs): 4
+        # print("len(image_coeffs):", len(image_coeffs), "len(text_coeffs):", len(text_coeffs))
         # 对每一级系数进行对齐和融合
         fused_coeffs = []
         for i in range(len(image_coeffs)):
