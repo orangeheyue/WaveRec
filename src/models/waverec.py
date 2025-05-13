@@ -20,6 +20,10 @@ from utils.utils import build_sim, compute_normalized_laplacian, build_knn_neigh
 
 
 class WaveRec(GeneralRecommender):
+    '''
+        paper: ACM CIKM 2026: WaveRec: Wavelet Learning for Multimodal Recommendation
+        code: https://github.com/orangeai-research/WaveRec
+    '''
     def __init__(self, config, dataset):
         super(WaveRec, self).__init__(config, dataset)
         self.sparse = True
@@ -30,6 +34,8 @@ class WaveRec(GeneralRecommender):
         self.reg_weight = config['reg_weight']
         self.image_knn_k = config['image_knn_k']
         self.text_knn_k = config['text_knn_k']
+        # print("self.text_knn_k:", self.text_knn_k)
+        self.fusion_knn_k = config['fusion_knn_k']
         self.dropout_rate = config['dropout_rate']
         self.dropout = nn.Dropout(p=self.dropout_rate)
 
@@ -41,8 +47,11 @@ class WaveRec(GeneralRecommender):
         nn.init.xavier_uniform_(self.item_id_embedding.weight)
 
         dataset_path = os.path.abspath(config['data_path'] + config['dataset'])
+
+        print("self.image_knn_k:", self.image_knn_k)
         image_adj_file = os.path.join(dataset_path, 'image_adj_{}_{}.pt'.format(self.image_knn_k, self.sparse))
         text_adj_file = os.path.join(dataset_path, 'text_adj_{}_{}.pt'.format(self.text_knn_k, self.sparse))
+        self.fusion_adj_file = os.path.join(dataset_path, 'fusion_adj_{}_{}.pt'.format(self.fusion_knn_k, self.sparse))
 
         self.norm_adj = self.get_adj_mat()
         self.R_sprse_mat = self.R
@@ -70,7 +79,9 @@ class WaveRec(GeneralRecommender):
                 torch.save(text_adj, text_adj_file)
             self.text_original_adj = text_adj.cuda() 
 
-        self.fusion_adj = self.max_pool_fusion()
+        # self.fusion_adj = self.max_pool_fusion()
+
+
 
         if self.v_feat is not None:
             self.image_trs = nn.Linear(self.v_feat.shape[1], self.embedding_dim)
@@ -124,31 +135,31 @@ class WaveRec(GeneralRecommender):
         self.fusion_complex_weight = nn.Parameter(torch.randn(1, self.embedding_dim // 2 + 1, 2, dtype=torch.float32))
         
 
-    def pre_epoch_processing(self):
-        pass
+    # def pre_epoch_processing(self):
+    #     pass
 
-    def max_pool_fusion(self):
-        image_adj = self.image_original_adj.coalesce()
-        text_adj = self.text_original_adj.coalesce()
+    # def max_pool_fusion(self):
+    #     image_adj = self.image_original_adj.coalesce()
+    #     text_adj = self.text_original_adj.coalesce()
 
-        image_indices = image_adj.indices().to(self.device)
-        image_values = image_adj.values().to(self.device)
-        text_indices = text_adj.indices().to(self.device)
-        text_values = text_adj.values().to(self.device)
+    #     image_indices = image_adj.indices().to(self.device)
+    #     image_values = image_adj.values().to(self.device)
+    #     text_indices = text_adj.indices().to(self.device)
+    #     text_values = text_adj.values().to(self.device)
 
-        combined_indices = torch.cat((image_indices, text_indices), dim=1)
-        combined_indices, unique_idx = torch.unique(combined_indices, dim=1, return_inverse=True)
+    #     combined_indices = torch.cat((image_indices, text_indices), dim=1)
+    #     combined_indices, unique_idx = torch.unique(combined_indices, dim=1, return_inverse=True)
 
-        combined_values_image = torch.full((combined_indices.size(1),), float('-inf')).to(self.device)
-        combined_values_text = torch.full((combined_indices.size(1),), float('-inf')).to(self.device)
+    #     combined_values_image = torch.full((combined_indices.size(1),), float('-inf')).to(self.device)
+    #     combined_values_text = torch.full((combined_indices.size(1),), float('-inf')).to(self.device)
 
-        combined_values_image[unique_idx[:image_indices.size(1)]] = image_values
-        combined_values_text[unique_idx[image_indices.size(1):]] = text_values
-        combined_values, _ = torch.max(torch.stack((combined_values_image, combined_values_text)), dim=0)
+    #     combined_values_image[unique_idx[:image_indices.size(1)]] = image_values
+    #     combined_values_text[unique_idx[image_indices.size(1):]] = text_values
+    #     combined_values, _ = torch.max(torch.stack((combined_values_image, combined_values_text)), dim=0)
 
-        fusion_adj = torch.sparse.FloatTensor(combined_indices, combined_values, image_adj.size()).coalesce()
+    #     fusion_adj = torch.sparse.FloatTensor(combined_indices, combined_values, image_adj.size()).coalesce()
 
-        return fusion_adj
+    #     return fusion_adj
 
     def get_adj_mat(self):
         adj_mat = sp.dok_matrix((self.n_users + self.n_items, self.n_users + self.n_items), dtype=np.float32)
@@ -183,82 +194,228 @@ class WaveRec(GeneralRecommender):
         shape = torch.Size(sparse_mx.shape)
         return torch.sparse.FloatTensor(indices, values, shape)
 
-    def spectrum_convolution(self, image_embeds, text_embeds):
-        """
-        Modality Denoising & Cross-Modality Fusion
-        """
-        image_fft = torch.fft.rfft(image_embeds, dim=1, norm='ortho')           
-        text_fft = torch.fft.rfft(text_embeds, dim=1, norm='ortho')
+    # def spectrum_convolution(self, image_embeds, text_embeds):
+    #     """
+    #     Modality Denoising & Cross-Modality Fusion
+    #     """
+    #     image_fft = torch.fft.rfft(image_embeds, dim=1, norm='ortho')           
+    #     text_fft = torch.fft.rfft(text_embeds, dim=1, norm='ortho')
 
-        image_complex_weight = torch.view_as_complex(self.image_complex_weight)   
-        text_complex_weight = torch.view_as_complex(self.text_complex_weight)
-        fusion_complex_weight = torch.view_as_complex(self.fusion_complex_weight)
+    #     image_complex_weight = torch.view_as_complex(self.image_complex_weight)   
+    #     text_complex_weight = torch.view_as_complex(self.text_complex_weight)
+    #     fusion_complex_weight = torch.view_as_complex(self.fusion_complex_weight)
 
-        #   Uni-modal Denoising
-        image_conv = torch.fft.irfft(image_fft * image_complex_weight, n=image_embeds.shape[1], dim=1, norm='ortho')    
-        text_conv = torch.fft.irfft(text_fft * text_complex_weight, n=text_embeds.shape[1], dim=1, norm='ortho')
+    #     #   Uni-modal Denoising
+    #     image_conv = torch.fft.irfft(image_fft * image_complex_weight, n=image_embeds.shape[1], dim=1, norm='ortho')    
+    #     text_conv = torch.fft.irfft(text_fft * text_complex_weight, n=text_embeds.shape[1], dim=1, norm='ortho')
 
-        #   Cross-modality fusion
-        fusion_conv = torch.fft.irfft(text_fft * image_fft * fusion_complex_weight, n=text_embeds.shape[1], dim=1, norm='ortho') 
-        
-        return image_conv, text_conv, fusion_conv
-    
+    #     #   Cross-modality fusion
+    #     fusion_conv = torch.fft.irfft(text_fft * image_fft * fusion_complex_weight, n=text_embeds.shape[1], dim=1, norm='ortho') 
+    #     # print("image_conv.shape:", image_conv.shape, "text_conv.shape:", text_conv.shape, "fusion_conv.shape:", fusion_conv.shape)
+    #     return image_conv, text_conv, fusion_conv
 
     def multimodal_multiscale_wavelet_align(self, image_embedding, text_embedding):
+
         '''
         Desc: 多模态多尺度小波变换对齐
         Args:
             image_embedding: 图像embedding, image_embedding.shape: torch.Size([7050, 64]) 
             text_embedding: 文本embedding, text_embedding.shape: torch.Size([7050, 64]), 7050个物品,每个物品编码为64维向量
         Function:
-            对图像和文本嵌入进行多模态多尺度小波变换对齐
+            对图像和文本嵌入进行多模态多尺度小波变换对齐 ：
+            Steps1: 选取模态领域适应的合适小波基['harr', 'db1-20', 'bior1.3'], 选择高通滤波器的下采样分级尺度level,本文默认选择level3, 注意输入的特征向量是一维度，因此暂时不考虑水平、垂直、对角。
+            Steps2: Multimodal Wavelet Transform Learning Project： 获取图像模态特征的image_coeffs（一个低通分量，三个高通分量）；文本模态特征的text_coeffs（一个低通分量，三个高通分量）
+            Steps3: 多模态多尺度频域空间对齐 Multimodal Multi-Scale Frequency Domain Align：
+                    3.1低频信号对齐
+                        1.对于低频信号（第 3 级水平低频分量），首先对图像模态和文本模态下的低频信号分别进行LoRA(奇异值分解（SVD）),用于去除冗余信息，保留主要特征。 
+                        2.然后,再分别对进行归一化，对图像低频信号，可将其像素值归一化到特定范围，如 [0, 1] 或 [-1, 1]，以消除不同图像之间的亮度差异等影响。 对于文本低频信号，可对词向量或特征向量进行归一化，使不同文本的特征具有可比性，例如采用 L2 归一化。
+                        3.然后再将LoRa和归一化后的两个模态的特征向量进行对齐，对齐方式采用语义注意力机制， 生成一个新的融合模态第 3 级水平低频分量
+                    3.2 高频信号多尺度对齐 TODO：高频信号不同等级能量是否才用不同对齐方式？
+                        1.对图像和文本的第 3 级水平高频分量进行对齐，对齐方式采用频域能量对齐，生成一个新的融合模态第 3 级水平高频分量
+                        2.对图像和文本的第 2 级水平高频分量进行对齐， 生成一个新的融合模态第 2 级水平高频分量
+                        3.对图像和文本的第 1 级水平高频分量分别先进行去噪，再进行对齐， 生成一个新的融合模态第 1 级水平高频分量
+            Steps4： Multimodal Wavelet Inverse Transform 多模态小波重建
+
+                    对融合模态的低频分量和3个高频分量进行小波逆变换，重建为一个多模态频域对齐以及语义域融合的特征向量fusion_wave
+                    对图像模态、文本模态经过上述变换后，进行小波逆变换，重建为新的图像image_embedding_wave、文本模态特征向量text_embedding_wave。
         Returns:
             image_embedding_wave.shape: torch.Size([7050, 64]) text_embedding_wave.shape: torch.Size([7050, 64]) fusion_wave.shape: torch.Size([7050, 64])
         '''
+        device = image_embedding.device
+        # print("device:", device)
+        # print("image_embedding:", image_embedding.shape)
         # 转换为numpy数组进行小波变换
-        image_np = image_embedding.cpu().numpy()
-        text_np = text_embedding.cpu().numpy()
+        # image_np = image_embedding.detach().cpu().numpy()
+        # text_np = text_embedding.detach().cpu().numpy()
 
         # 定义小波类型
         wavelet = 'db4'
-        level = 3
+        level = 3 
 
         # 对图像和文本嵌入进行小波变换
-        image_coeffs = pywt.wavedec(image_np, wavelet, level=level, axis=1)
-        text_coeffs = pywt.wavedec(text_np, wavelet, level=level, axis=1)
+        '''
+        原始信号 如果输入是 (256, 256) 的图像，axis=1（水平方向分解），level=3：
+    │
+        ├── cA3（最低频，最模糊的近似）      主体信号，轮廓 （保留）  (256, 32)  第 3 级水平低频分量
+        │
+        ├── cD3（第3级细节，较大尺度的高频） 大尺度边缘 最精细的细节信息 (256, 32) 第 3 级水平高频分量
+        │
+        ├── cD2（第2级细节，中等尺度的高频） 中尺度细节，更细微的边缘和纹理变化 (256, 64) 第 2 级水平高频分量
+        │
+        └── cD1（第1级细节，最细尺度的高频） 高频噪声->去噪 (256, 128) 第 1 级水平高频分量
+        '''
+        image_coeffs = self.wavelet_decompose(image_embedding, wavelet, level=level, axis=1, device=device)
+        text_coeffs = self.wavelet_decompose(text_embedding, wavelet, level=level, axis=1, device=device)
 
+        '''
+        image_coeffs shapes:
+            wavelet_decompose Level 4: (7050, 14)
+            wavelet_decompose Level 3: (7050, 14)
+            wavelet_decompose Level 2: (7050, 21)
+            wavelet_decompose Level 1: (7050, 35)
+        text_coeffs shapes:
+            wavelet_decompose Level 4: (7050, 14)
+            wavelet_decompose Level 3: (7050, 14)
+            wavelet_decompose Level 2: (7050, 21)
+            wavelet_decompose Level 1: (7050, 35)
+        '''
+        # len(image_coeffs): 4 len(text_coeffs): 4
+        # print("len(image_coeffs):", len(image_coeffs), "len(text_coeffs):", len(text_coeffs))
         # 对每一级系数进行对齐和融合
+        # ===================== 多模态多尺度频域对齐 =====================
         fused_coeffs = []
-        for i in range(len(image_coeffs)):
-            # 简单的平均融合
-            fused_coeff = (image_coeffs[i] + text_coeffs[i]) / 2
-            fused_coeffs.append(fused_coeff)
+        img_coeffs_proc = []
+        txt_coeffs_proc = []
+
+        for i, (img_coeff, txt_coeff) in enumerate(zip(image_coeffs, text_coeffs)):        
+            # 低频分量
+            if i == 0: 
+                img_proc = self.process_low(img_coeff, modality='image')
+                txt_proc = self.process_low(txt_coeff, modality='text')
+                # 融合
+                fused = self.fuse_low(img_proc, txt_proc)
+            # 高频分量
+            else:       
+                level_type = len(image_coeffs) - i  # 计算当前层级(3,2,1)
+                # 直接传递原始系数用于重建
+                img_proc = img_coeff  
+                txt_proc = txt_coeff
+                # 融合处理
+                fused = self.fuse_high(img_coeff, txt_coeff, level_type)
+            # 保存处理结果
+            img_coeffs_proc.append(img_proc)
+            txt_coeffs_proc.append(txt_proc)
+            fused_coeffs.append(fused)
+
 
         # 进行小波逆变换
-        image_embedding_wave_np = pywt.waverec(image_coeffs, wavelet, axis=1)
-        text_embedding_wave_np = pywt.waverec(text_coeffs, wavelet, axis=1)
-        fusion_wave_np = pywt.waverec(fused_coeffs, wavelet, axis=1)
-
-        # 转换回torch张量
-        image_embedding_wave = torch.tensor(image_embedding_wave_np, dtype=torch.float32, device=image_embedding.device)
-        text_embedding_wave = torch.tensor(text_embedding_wave_np, dtype=torch.float32, device=text_embedding.device)
-        fusion_wave = torch.tensor(fusion_wave_np, dtype=torch.float32, device=image_embedding.device)
+        image_embedding_wave = self.wavelet_reconstruct(img_coeffs_proc, wavelet, axis=1, device=device)
+        text_embedding_wave = self.wavelet_reconstruct(txt_coeffs_proc, wavelet, axis=1, device=device)
+        fusion_wave = self.wavelet_reconstruct(fused_coeffs, wavelet, axis=1, device=device)
 
         return image_embedding_wave, text_embedding_wave, fusion_wave
 
+    def wavelet_decompose(self, x, wavelet='db4', level=3, axis=1, device='cuda'):
+        '''
+            小波变换分解
+            Steps1: 选取模态领域适应的合适小波基['harr', 'db1-20', 'bior1.3'], 选择高通滤波器的下采样分级尺度level,本文默认选择level3, 注意输入的特征向量是一维度，因此暂时不考虑水平、垂直、对角。
 
-    
+        '''
+        x_np = x.detach().cpu().numpy()
+        coeffs = pywt.wavedec(x_np, wavelet, level=level, axis=axis)
+        return [torch.tensor(c, device=device, dtype=torch.float32) for c in coeffs]
+        # return pywt.wavedec(x, wavelet, level=level, axis=axis)
+
+        # ===================== 小波重建 =====================
+    def wavelet_reconstruct(self, coeffs, wavelet='db4', axis=1, device='cuda'):
+        coeffs_np = [c.detach().cpu().numpy() for c in coeffs]
+        rec = pywt.waverec(coeffs_np, wavelet, axis=1)
+        return torch.tensor(rec, device=device, dtype=torch.float32)
+
+    def process_low(self, coeff, modality='image'):
+        """
+            低频信号: SVD降维+归一化
+        """
+        # SVD降维
+        U, S, V = torch.svd_lowrank(coeff, q=min(coeff.shape)//2)
+        recon = U @ torch.diag(S) @ V.T
+        # 归一化
+        if modality == 'image':
+            recon = 2 * (recon - recon.min())/(recon.max() - recon.min() + 1e-8) - 1
+        else:
+            recon = torch.nn.functional.normalize(recon, p=2, dim=1)
+        return recon
+
+    def fuse_low(self, img_low, txt_low):
+        """
+            低频信号对齐: 基于语义的attention
+        """
+        # 语义注意力机制
+        attn = torch.stack([img_low, txt_low], dim=1)  # [N, 2, D]
+        attn_weights = torch.softmax(attn @ attn.transpose(1, 2), dim=1)  # [N, 2, 2]
+        # 加权融合
+        w_img = attn_weights[:, 0, 0].unsqueeze(1)
+        w_txt = attn_weights[:, 0, 1].unsqueeze(1)
+        return w_img * img_low + w_txt * txt_low
+
+
+    def fuse_high(self, img_high, txt_high, level_type):
+        """
+            低频信号对齐: 基于语义的attention
+        """
+        eps = 1e-8  # 防止除以零
+        
+        if level_type == 3 or level_type == 2:  # 能量对齐
+            energy_img = torch.norm(img_high, dim=1, keepdim=True)
+            energy_txt = torch.norm(txt_high, dim=1, keepdim=True)
+            return (energy_img*img_high + energy_txt*txt_high)/(energy_img + energy_txt + eps)
+            
+        # elif level_type == 2:  # 直接平均
+            # return (img_high + txt_high) / 2
+            # def denoise(x):
+            #     threshold = torch.median(torch.abs(x)) / 0.6745
+            #     return torch.sign(x) * torch.relu(torch.abs(x) - threshold)
+                
+            # return (denoise(img_high) + denoise(txt_high)) / 2
+            
+        elif level_type == 1:  # 去噪后融合
+            def denoise(x):
+                threshold = torch.median(torch.abs(x)) / 0.6745
+                return torch.sign(x) * torch.relu(torch.abs(x) - threshold)
+                
+            return (denoise(img_high) + denoise(txt_high)) / 2
+            # return (img_high + txt_high) / 2
+
+    def build_item_item_fusion_graph(self, fusion_embedding):
+        '''
+            构造item-item fusion graph
+        '''
+        if os.path.exists(self.fusion_adj_file):
+            fusion_adj = torch.load(self.fusion_adj_file)
+        else:
+            fusion_adj = build_sim(fusion_embedding.detach())
+            fusion_adj = build_knn_normalized_graph(fusion_adj, topk=self.fusion_knn_k, is_sparse=self.sparse, norm_type='sym')
+            torch.save(fusion_adj, self.fusion_adj_file)
+        
+        return fusion_adj.cuda() 
+
     def forward(self, adj, train=False):
         if self.v_feat is not None:
             image_feats = self.image_trs(self.image_embedding.weight)
         if self.t_feat is not None:
             text_feats = self.text_trs(self.text_embedding.weight)
         
-        #   Spectrum Modality Fusion
-        image_conv, text_conv, fusion_conv = self.spectrum_convolution(image_feats, text_feats)
-        image_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_v(image_conv))
-        text_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_t(text_conv))
-        fusion_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_f(fusion_conv))
+        # Multimodal Multi-Sacle align
+        image_embedding, text_embedding, fusion_embedding = self.multimodal_multiscale_wavelet_align(image_feats, text_feats)
+        image_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_v(image_embedding))
+        text_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_t(text_embedding))
+        fusion_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_f(fusion_embedding))
+
+
+        # load or build fusion item-item graph
+
+        # self.fusion_adj = self.build_item_item_fusion_graph(fusion_embedding)
+    
 
         #   User-Item (Behavioral) View
         item_embeds = self.item_id_embedding.weight
@@ -273,6 +430,7 @@ class WaveRec(GeneralRecommender):
         all_embeddings = torch.stack(all_embeddings, dim=1)
         all_embeddings = all_embeddings.mean(dim=1, keepdim=False)
         content_embeds = all_embeddings
+        # print("content_embeds.shape:", content_embeds.shape) # content_embeds.shape: torch.Size([26495, 64])
 
         #   Item-Item Modality Specific and Fusion views
         #   Image-view
@@ -296,8 +454,9 @@ class WaveRec(GeneralRecommender):
         text_embeds = torch.cat([text_user_embeds, text_item_embeds], dim=0)
 
         #   Fusion-view
+        self.fusion_adj = torch.sqrt(self.text_original_adj * self.text_original_adj + self.image_original_adj * self.image_original_adj) / 2
         if self.sparse:
-            for i in range(self.n_layers):
+            for i in range(self.n_layers): 
                 fusion_item_embeds = torch.sparse.mm(self.fusion_adj, fusion_item_embeds)
         else:
             for i in range(self.n_layers):
@@ -323,6 +482,7 @@ class WaveRec(GeneralRecommender):
         fusion_embeds = torch.multiply(fusion_prefer, fusion_embeds)
 
         side_embeds = torch.mean(torch.stack([agg_image_embeds, agg_text_embeds, fusion_embeds]), dim=0) 
+        # side_embeds = torch.mean(torch.stack([fusion_embeds]), dim=0) 
 
         all_embeds = content_embeds + side_embeds
 
@@ -373,10 +533,14 @@ class WaveRec(GeneralRecommender):
 
         side_embeds_users, side_embeds_items = torch.split(side_embeds, [self.n_users, self.n_items], dim=0)
         content_embeds_user, content_embeds_items = torch.split(content_embeds, [self.n_users, self.n_items], dim=0)
-        cl_loss = self.InfoNCE(side_embeds_items[pos_items], content_embeds_items[pos_items], 0.2) + self.InfoNCE(
-            side_embeds_users[users], content_embeds_user[users], 0.2)
+        cl_loss = self.InfoNCE(side_embeds_items[pos_items], content_embeds_items[pos_items], 0.2) + self.InfoNCE(side_embeds_users[users], content_embeds_user[users], 0.2)
+        
+        #item-item constractive loss
+        cl_loss1 = self.InfoNCE(side_embeds_items[pos_items], content_embeds_items[pos_items], 0.2) + self.InfoNCE(side_embeds_users[users], content_embeds_user[users], 0.2) 
+        #user-item constractive loss
+        cl_loss2 = self.InfoNCE(u_g_embeddings, content_embeds_items[pos_items], 0.2) + self.InfoNCE(u_g_embeddings, side_embeds_items[pos_items], 0.2)
 
-        return batch_mf_loss + batch_emb_loss + batch_reg_loss + self.cl_loss * cl_loss
+        return batch_mf_loss + batch_emb_loss + batch_reg_loss + self.cl_loss * cl_loss1 + self.cl_loss * 0.1 * cl_loss2
 
     def full_sort_predict(self, interaction):
         user = interaction[0]
