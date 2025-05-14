@@ -19,6 +19,7 @@ from common.abstract_recommender import GeneralRecommender
 from utils.utils import build_sim, compute_normalized_laplacian, build_knn_neighbourhood, build_knn_normalized_graph
 
 
+
 class WaveRec(GeneralRecommender):
     '''
         paper: ACM CIKM 2026: WaveRec: Wavelet Learning for Multimodal Recommendation
@@ -38,6 +39,9 @@ class WaveRec(GeneralRecommender):
         self.fusion_knn_k = config['fusion_knn_k']
         self.dropout_rate = config['dropout_rate']
         self.dropout = nn.Dropout(p=self.dropout_rate)
+
+        # 多模态小波兴趣感知
+        self.mm_wavelet_interest_aware = MultiModalWaveletInterestAttention(embed_dim=self.embedding_dim)
 
         self.interaction_matrix = dataset.inter_matrix(form='coo').astype(np.float32)
 
@@ -365,17 +369,17 @@ class WaveRec(GeneralRecommender):
         """
         eps = 1e-8  # 防止除以零
         
-        if level_type == 3 or level_type == 2:  # 能量对齐
+        if level_type == 3 :  # 能量对齐
             energy_img = torch.norm(img_high, dim=1, keepdim=True)
             energy_txt = torch.norm(txt_high, dim=1, keepdim=True)
             return (energy_img*img_high + energy_txt*txt_high)/(energy_img + energy_txt + eps)
-            
-        # elif level_type == 2:  # 直接平均
             # return (img_high + txt_high) / 2
+            
+        elif level_type == 2:  # 直接平均
+            return (img_high + txt_high) / 2
             # def denoise(x):
             #     threshold = torch.median(torch.abs(x)) / 0.6745
             #     return torch.sign(x) * torch.relu(torch.abs(x) - threshold)
-                
             # return (denoise(img_high) + denoise(txt_high)) / 2
             
         elif level_type == 1:  # 去噪后融合
@@ -384,8 +388,9 @@ class WaveRec(GeneralRecommender):
                 return torch.sign(x) * torch.relu(torch.abs(x) - threshold)
                 
             return (denoise(img_high) + denoise(txt_high)) / 2
-            # return (img_high + txt_high) / 2
+            #return (img_high + txt_high) / 2
 
+        
     def build_item_item_fusion_graph(self, fusion_embedding):
         '''
             构造item-item fusion graph
@@ -472,15 +477,26 @@ class WaveRec(GeneralRecommender):
         fusion_soft_t = self.softmax(fusion_att_t)
         agg_text_embeds = fusion_soft_t * text_embeds
 
+        # 模态偏好感知
         image_prefer = self.gate_image_prefer(content_embeds)
         text_prefer = self.gate_text_prefer(content_embeds)
+
         fusion_prefer = self.gate_fusion_prefer(content_embeds)
         image_prefer, text_prefer, fusion_prefer = self.dropout(image_prefer), self.dropout(text_prefer), self.dropout(fusion_prefer)
-
-        agg_image_embeds = torch.multiply(image_prefer, agg_image_embeds)
-        agg_text_embeds = torch.multiply(text_prefer, agg_text_embeds)
-        fusion_embeds = torch.multiply(fusion_prefer, fusion_embeds)
-
+        # print("image_prefer.shape:", image_prefer.shape, "text_prefer.shape:", text_prefer.shape, "fusion_prefer.shape:", fusion_prefer.shape)
+        # print("agg_image_embeds.shape:", agg_image_embeds.shape, "agg_text_embeds.shape:", agg_text_embeds.shape, "fusion_embeds.shape:", fusion_embeds.shape)
+        '''
+        content_embeds.shape: torch.Size([26495, 64])
+        image_prefer.shape: torch.Size([26495, 64]) text_prefer.shape: torch.Size([26495, 64]) fusion_prefer.shape: torch.Size([26495, 64])
+        agg_image_embeds.shape: torch.Size([26495, 64]) agg_text_embeds.shape: torch.Size([26495, 64]) fusion_embeds.shape: torch.Size([26495, 64])
+        '''
+        agg_image_embeds = torch.multiply(image_prefer, agg_image_embeds) # 图像模态偏好感知
+        agg_text_embeds = torch.multiply(text_prefer, agg_text_embeds) # 文本模态偏好感知
+        fusion_embeds = torch.multiply(fusion_prefer, fusion_embeds) # 兴趣偏好感知
+        # 公共兴趣和个性化兴趣偏好感知
+        fusion_embeds = self.mm_wavelet_interest_aware(content_embeds, fusion_embeds)
+        
+        # print("content_embeds.shape:", content_embeds.shape)
         side_embeds = torch.mean(torch.stack([agg_image_embeds, agg_text_embeds, fusion_embeds]), dim=0) 
         # side_embeds = torch.mean(torch.stack([fusion_embeds]), dim=0) 
 
@@ -551,6 +567,200 @@ class WaveRec(GeneralRecommender):
         # dot with all item embedding to accelerate
         scores = torch.matmul(u_embeddings, restore_item_e.transpose(0, 1))
         return scores
-    
 
+
+class MultiModalWaveletInterestAttention(nn.Module):
+    '''
+    Desc:
+        当前的方法无法分离用户对物品的大众兴趣和小众兴趣，
+        -------------------------------------------
+        优点：
+
+            小波变换能有效分离频域特征，适合兴趣分解
+
+            低频/高频的区分符合热门/小众兴趣的特性
+
+            Attention加权可以动态平衡两种兴趣
+        -------------------------------------------
+        基于小波变换的，多模态兴趣偏好感知, 初步思路是：
+        分别对content_embeds和fusion_embeds进行小波分解，然后在低频(对多模态公共兴趣，热门兴趣)和高频特征(个性化兴趣，小众兴趣)中进行用户兴趣感，可以用torch.multiply或者其他优雅的发方式， 
+        然后，将融合后的低频特征(热门兴趣) 和 高频特征(小众兴趣) 设计一个attention进行加权
+        最后再小波逆变换。
+    Args:
+        content_embeds.shape: torch.Size([26495, 64])  用户和物品的embedding
+        fusion_embeds.shape: torch.Size([26495, 64])   多模态融合的embeeding
+    Returns:
+        mm_interest_prefer_aware_embeds: torch.Size([26495, 64]) 
+    '''
+    def __init__(self, embed_dim, wavelet_name='db1'):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.wavelet_name = wavelet_name
+        
+        # 可学习的attention权重
+        self.attention = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim //2),
+            nn.BatchNorm1d(embed_dim //2),
+            nn.LeakyReLU(),
+            nn.Linear(embed_dim // 2, 2),
+            nn.Softmax(dim=-1)
+        )
+        
+    def wavelet_decomp(self, x):
+        """小波分解为低频和高频成分"""
+        coeffs = pywt.wavedec(x.detach().cpu().numpy(), self.wavelet_name, level=1, axis=1)
+        cA = torch.from_numpy(coeffs[0]).to(x.device)  # 低频
+        cD = torch.from_numpy(coeffs[1]).to(x.device)  # 高频
+        # =print("coeffs[0].shape:", coeffs[0].shape, "coeffs[1].shape:", coeffs[0].shape)
+        # if coeffs[0].shape == coeffs[1].shape:
+        #     self.wavelet_decomp_dim = coeffs[0].shape[1]
+        return cA, cD
     
+    def wavelet_recon(self, cA, cD):
+        """小波重构"""
+        coeffs = [cA.detach().cpu().numpy(), cD.detach().cpu().numpy()]
+        return torch.from_numpy(pywt.waverec(coeffs, self.wavelet_name, axis=1)).to(cA.device)
+    
+    def forward(self, content_embeds, fusion_embeds):
+        # 小波分解
+        content_cA, content_cD = self.wavelet_decomp(content_embeds)
+        fusion_cA, fusion_cD = self.wavelet_decomp(fusion_embeds)
+        
+        # 兴趣感知融合
+        # 低频部分(热门兴趣)用元素相乘增强共享特征
+        low_freq = content_cA * fusion_cA # low_freq.shape: torch.Size([26495, 32])
+        # print("low_freq.shape:", low_freq.shape)
+        # 高频部分(个性化兴趣)用加权平均
+        high_freq = (content_cD * fusion_cD) # high_freq.shape: torch.Size([26495, 32])
+        # 动态权重学习
+        combined = torch.cat([low_freq, high_freq], dim=-1) # combined.shape torch.Size([26495, 64])
+        # print("combined.shape", combined.shape)
+        weights = self.attention(combined)  # [batch, 2]
+        # print("weights:", weights)
+        # 加权融合  
+        # fused = weights[:, 0:1] * low_freq + weights[:, 1:2] * high_freq
+        low_freq_fused, high_freq_fused = weights[:, 0:1] * low_freq, weights[:, 1:2] * high_freq
+
+        # low_freq_fused, high_freq_fused = self.optimized_fusion(content_cA, content_cD, fusion_cA, fusion_cD)
+        # 小波重构
+        output = self.wavelet_recon(low_freq_fused, high_freq_fused)
+        # # 残差连接
+        return output + content_embeds
+        # print("output.shape:", output.shape)
+        return output
+
+    def optimized_fusion(self, content_cA, content_cD, fusion_cA, fusion_cD):
+        # 低频：门控双线性融合
+        gate = torch.sigmoid(
+            torch.sum(content_cA * fusion_cA, dim=-1, keepdim=True) / 
+            (torch.norm(content_cA, dim=-1, keepdim=True) * 
+            torch.norm(fusion_cA, dim=-1, keepdim=True) + 1e-6)
+        )
+        low_freq = gate * (content_cA * fusion_cA)
+        
+        # 高频：自适应残差融合
+        residual = fusion_cD - content_cD
+        adapt_gate = torch.sigmoid(
+            nn.Linear(content_cD.shape[-1], 1)(residual)
+        )
+        high_freq = content_cD + adapt_gate * residual
+        
+        return low_freq, high_freq
+
+# class MultiModalWaveletInterestAttention(nn.Module):
+#     def __init__(self, embed_dim, wavelet_name='db1'):
+#         super().__init__()
+#         self.embed_dim = embed_dim
+#         self.wavelet_name = wavelet_name
+        
+#         # 可学习的attention权重
+#         self.attention = nn.Sequential(
+#             nn.Linear(embed_dim, embed_dim // 2),
+#             nn.BatchNorm1d(embed_dim // 2),
+#             nn.LeakyReLU(),
+#             nn.Linear(embed_dim // 2, 2),
+#             nn.Softmax(dim=-1)
+#         )
+        
+#         # 高频融合的门控网络
+#         self.adapt_gate = nn.Sequential(
+#             nn.Linear(embed_dim // 2, embed_dim // 2),
+#             nn.LeakyReLU(),
+#             nn.Linear(embed_dim // 2, 1),
+#             nn.Sigmoid()
+#         )
+        
+#     def wavelet_decomp(self, x):
+#         """设备安全的小波分解"""
+#         # 确保在CPU上计算
+#         x_np = x.detach().cpu().numpy()
+        
+#         # 处理奇数长度
+#         if x_np.shape[1] % 2 != 0:
+#             x_np = np.pad(x_np, [(0,0), (0,1)], mode='edge')
+            
+#         coeffs = pywt.wavedec(x_np, self.wavelet_name, level=1, axis=1)
+#         cA = torch.from_numpy(coeffs[0]).float().to(x.device)  # 低频
+#         cD = torch.from_numpy(coeffs[1]).float().to(x.device)  # 高频
+#         return cA, cD
+    
+#     def wavelet_recon(self, cA, cD, target_dim):
+#         """设备安全的小波重构"""
+#         # 确保在CPU上计算
+#         cA_np = cA.detach().cpu().numpy()
+#         cD_np = cD.detach().cpu().numpy()
+        
+#         coeffs = [cA_np, cD_np]
+#         recon = pywt.waverec(coeffs, self.wavelet_name, axis=1)
+        
+#         # 调整维度
+#         if recon.shape[1] > target_dim:
+#             recon = recon[:, :target_dim]
+#         elif recon.shape[1] < target_dim:
+#             recon = np.pad(recon, [(0,0), (0, target_dim - recon.shape[1])], mode='constant')
+            
+#         return torch.from_numpy(recon).float().to(cA.device)
+    
+#     def optimized_fusion(self, content_cA, content_cD, fusion_cA, fusion_cD):
+#         """设备安全的优化融合"""
+#         # 低频：门控双线性融合
+#         norm_product = (torch.norm(content_cA, dim=-1, keepdim=True) * 
+#                        torch.norm(fusion_cA, dim=-1, keepdim=True) + 1e-6)
+#         gate = torch.sigmoid(
+#             torch.sum(content_cA * fusion_cA, dim=-1, keepdim=True) / norm_product
+#         )
+#         low_freq = gate * (content_cA * fusion_cA)
+        
+#         # 高频：自适应残差融合
+#         residual = fusion_cD - content_cD
+#         adapt_gate = self.adapt_gate(residual)
+#         high_freq = content_cD + adapt_gate * residual
+        
+#         return low_freq, high_freq
+    
+#     def forward(self, content_embeds, fusion_embeds):
+#         # 输入验证
+#         assert content_embeds.device == fusion_embeds.device
+#         original_dim = content_embeds.size(1)
+        
+#         # 小波分解
+#         content_cA, content_cD = self.wavelet_decomp(content_embeds)
+#         fusion_cA, fusion_cD = self.wavelet_decomp(fusion_embeds)
+        
+#         # 优化融合
+#         low_freq, high_freq = self.optimized_fusion(
+#             content_cA, content_cD, fusion_cA, fusion_cD
+#         )
+        
+#         # 动态权重学习
+#         combined = torch.cat([low_freq, high_freq], dim=-1)
+#         weights = self.attention(combined)
+        
+#         # 加权融合
+#         fused_low = weights[:, 0:1] * low_freq
+#         fused_high = weights[:, 1:2] * high_freq
+        
+#         # 小波重构
+#         output = self.wavelet_recon(fused_low, fused_high, original_dim)
+        
+#         return output + content_embeds  # 残差连接
