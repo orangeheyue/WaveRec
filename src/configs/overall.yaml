@@ -22,7 +22,7 @@ req_training: True
 epochs: 1000
 stopping_step: 20
 # train_batch_size: 2048
-train_batch_size: 4096
+train_batch_size: 2048
 learner: adam
 learning_rate: 0.001
 learning_rate_scheduler: [1.0, 50]

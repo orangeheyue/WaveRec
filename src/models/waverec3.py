@@ -44,9 +44,7 @@ class WaveRec(GeneralRecommender):
 		self.dropout = nn.Dropout(p=self.dropout_rate)
 		self.MMWA = config['MMWA']
 		self.MMWI = config['MMWI']
-		self.MMCL = config['MMCL']
-		self.temperature = config['temperature']
-		
+
 
 		# self.visual_modal_expert = VisualModalExpertNetwork(in_features=4096)
 		# self.text_modal_expert = TextModalExpertNetwork(in_features=384)
@@ -59,8 +57,7 @@ class WaveRec(GeneralRecommender):
 		self.mm_wavelet_interest_aware = MultiModalWaveletInterestAttention(embed_dim=self.embedding_dim, wavelet_name='db1',decomp_level=1)
 
 		self.interaction_matrix = dataset.inter_matrix(form='coo').astype(np.float32)
-		#print("self.interaction_matrix.shape:", self.interaction_matrix.shape) # self.interaction_matrix.shape: # self.interaction_matrix.shape: (26495, 7050)
-		#rint("self.interaction_matrix:", self.interaction_matrix) 
+
 		self.user_embedding = nn.Embedding(self.n_users, self.embedding_dim)
 		self.item_id_embedding = nn.Embedding(self.n_items, self.embedding_dim)
 		nn.init.xavier_uniform_(self.user_embedding.weight)
@@ -76,10 +73,7 @@ class WaveRec(GeneralRecommender):
 		self.norm_adj = self.get_adj_mat()
 		self.R_sprse_mat = self.R
 		self.R = self.sparse_mx_to_torch_sparse_tensor(self.R).float().to(self.device)
-		print("self.R:", self.R) #
-		#print("self.R.shape:", self.R.shape) # self.R.shape: torch.Size([19445, 7050])
 		self.norm_adj = self.sparse_mx_to_torch_sparse_tensor(self.norm_adj).float().to(self.device)
-		#print("self.norm_adj.shape:", self.norm_adj.shape) # self.norm_adj.shape: torch.Size([26495, 26495])
 
 		if self.v_feat is not None:
 			self.image_embedding = nn.Embedding.from_pretrained(self.v_feat, freeze=False)
@@ -221,20 +215,16 @@ class WaveRec(GeneralRecommender):
 		# 	text_feats = self.text_modal_expert(self.text_embedding.weight)
 		
 		# (Multimodal Multi-Sacle Wavelet align, MMWA)
-
-		# TODO: Ablation Study1: TODO MMWA
 		if self.MMWA:
 			image_embedding, text_embedding, fusion_embedding = self.multimodal_multiscale_wavelet_align(image_feats, text_feats)
-			#print("fusion_embedding.shape:", fusion_embedding.shape)
 		else:
 			image_embedding = image_feats
 			text_embedding = text_feats
-			fusion_embedding = torch.zeros_like(image_feats)
 
 		image_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_v(image_embedding))
 		text_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_t(text_embedding))
 		fusion_item_embeds = torch.multiply(self.item_id_embedding.weight, self.gate_f(fusion_embedding))
-		#interest_fusion, low_freq_interest, high_freq_interest = self.mm_wavelet_interest_aware(image_item_embeds, text_item_embeds, fusion_item_embeds)
+		# interest_fusion, low_freq_interest, high_freq_interest = self.mm_wavelet_interest_aware(image_item_embeds, text_item_embeds, fusion_item_embeds)
 
 		# load or build fusion item-item graph
 		# self.fusion_adj = self.build_item_item_fusion_graph(fusion_embedding)
@@ -261,8 +251,6 @@ class WaveRec(GeneralRecommender):
 		else:
 			for i in range(self.n_layers):
 				image_item_embeds = torch.mm(self.image_original_adj, image_item_embeds)
-
-
 		image_user_embeds = torch.sparse.mm(self.R, image_item_embeds)
 		image_embeds = torch.cat([image_user_embeds, image_item_embeds], dim=0)
  
@@ -287,11 +275,10 @@ class WaveRec(GeneralRecommender):
 		fusion_user_embeds = torch.sparse.mm(self.R, fusion_item_embeds)
 		# multimodal interest aware(mmia)
 		mmia, low_freq_interest, high_freq_interest = self.mm_wavelet_interest_aware(image_item_embeds, text_item_embeds, fusion_item_embeds)
-	
+
 		fusion_embeds = torch.cat([fusion_user_embeds, fusion_item_embeds + mmia], dim=0)
 
-
-		#   Modality-aware Preference Module
+		########################################################Modality-aware Preference Module########################################################################
 		fusion_att_v, fusion_att_t = self.query_v(fusion_embeds), self.query_t(fusion_embeds)
 		fusion_soft_v = self.softmax(fusion_att_v)
 		agg_image_embeds = fusion_soft_v * image_embeds
@@ -304,8 +291,6 @@ class WaveRec(GeneralRecommender):
 		text_prefer = self.gate_text_prefer(content_embeds)
 		fusion_prefer = self.gate_fusion_prefer(content_embeds)
 		image_prefer, text_prefer, fusion_prefer = self.dropout(image_prefer), self.dropout(text_prefer), self.dropout(fusion_prefer)
-		# print("image_prefer.shape:", image_prefer.shape, "text_prefer.shape:", text_prefer.shape, "fusion_prefer.shape:", fusion_prefer.shape)
-		# print("agg_image_embeds.shape:", agg_image_embeds.shape, "agg_text_embeds.shape:", agg_text_embeds.shape, "fusion_embeds.shape:", fusion_embeds.shape)
 		'''
 		content_embeds.shape: torch.Size([26495, 64])
 		image_prefer.shape: torch.Size([26495, 64]) text_prefer.shape: torch.Size([26495, 64]) fusion_prefer.shape: torch.Size([26495, 64])
@@ -315,24 +300,12 @@ class WaveRec(GeneralRecommender):
 		agg_text_embeds = torch.multiply(text_prefer, agg_text_embeds) # 文本模态偏好感知
 		fusion_embeds = torch.multiply(fusion_prefer, fusion_embeds) # 兴趣偏好感知
 		# 公共兴趣和个性化兴趣偏好感知
-		# fusion_embeds = self.mm_wavelet_interest_aware(content_embeds, fusion_embeds)
-		#fusion_embeds = self.mm_wavelet_interest_aware(agg_image_embeds, agg_text_embeds)
-		#print("fusion_embeds:", fusion_embeds)
-		# print("content_embeds.shape:", content_embeds.shape)
 
-		# TODO: Ablation Study2: TODO MMWI
-		if self.MMWI:
-			side_embeds = torch.mean(torch.stack([agg_image_embeds, agg_text_embeds, fusion_embeds]), dim=0) 
-		else:
-			side_embeds = torch.mean(torch.stack([image_embeds, text_embeds]), dim=0) 
+		side_embeds = torch.mean(torch.stack([agg_image_embeds, agg_text_embeds, fusion_embeds]), dim=0) 
+		#side_embeds = torch.mean(torch.stack([agg_image_embeds, agg_text_embeds]), dim=0) 
+		# side_embeds = torch.mean(torch.stack([fusion_embeds]), dim=0) 
 
-
-		
-		# if self.MMWI:
-		# 	all_embeds, low_freq_interest, high_freq_interest = self.mm_wavelet_interest_aware(content_embeds, side_embeds)
-		# else:
 		all_embeds = content_embeds + side_embeds
-		# low_freq_interest, high_freq_interest = 0, 0
 		all_embeddings_users, all_embeddings_items = torch.split(all_embeds, [self.n_users, self.n_items], dim=0)
 
 		if train:
@@ -382,16 +355,13 @@ class WaveRec(GeneralRecommender):
 		content_embeds_user, content_embeds_items = torch.split(content_embeds, [self.n_users, self.n_items], dim=0)
 
 		#item-item constractive loss
-		cl_loss1 = self.InfoNCE(side_embeds_items[pos_items], content_embeds_items[pos_items], self.temperature) + self.InfoNCE(side_embeds_users[users], content_embeds_user[users], self.temperature) 
+		cl_loss1 = self.InfoNCE(side_embeds_items[pos_items], content_embeds_items[pos_items], 0.2) + self.InfoNCE(side_embeds_users[users], content_embeds_user[users], 0.2) 
 		#user-item constractive loss
-		#cl_loss2 = self.InfoNCE(u_g_embeddings, content_embeds_items[pos_items], 0.2) + self.InfoNCE(u_g_embeddings, side_embeds_items[pos_items], 0.2)
+		cl_loss2 = self.InfoNCE(u_g_embeddings, content_embeds_items[pos_items], 0.2) + self.InfoNCE(u_g_embeddings, side_embeds_items[pos_items], 0.2)
 
 		# hot-interest cold-interest
-		# TODO: Abstudy Study MCL
-		if self.MMCL:
-			cl_loss2 =self.InfoNCE(low_freq_interest, high_freq_interest, self.temperature)
-		else:
-			cl_loss2 = 0
+		# if self.MMWI:
+		# 	cl_loss3 =self.InfoNCE(low_freq_interest, high_freq_interest, 0.2)
 			# low_freq_embeds_users, low_freq_embeds_items = torch.split(low_freq_interest, [self.n_users, self.n_items], dim=0)
 			# high_freq_embeds_user, high_freq_embeds_items = torch.split(high_freq_interest, [self.n_users, self.n_items], dim=0)
 			# cl_loss3 = self.InfoNCE(low_freq_embeds_items[pos_items], high_freq_embeds_items[pos_items], 0.2) + self.InfoNCE(low_freq_embeds_users[users], high_freq_embeds_user[users], 0.2)
@@ -400,7 +370,7 @@ class WaveRec(GeneralRecommender):
 
 		# return batch_mf_loss + batch_emb_loss + batch_reg_loss + self.cl_loss * cl_loss1 + self.cl_loss * 0.1 * cl_loss2 + self.cl_loss * 0.1 * cl_loss3
 		#return batch_mf_loss + batch_emb_loss + batch_reg_loss + self.cl_loss1 * cl_loss1 + self.cl_loss2  * cl_loss2 + self.cl_loss3 * cl_loss3
-		return batch_mf_loss + batch_emb_loss + batch_reg_loss + self.cl_loss1 * cl_loss1  + self.cl_loss2  * 0.1 * cl_loss2
+		return batch_mf_loss + batch_emb_loss + batch_reg_loss + self.cl_loss1 * cl_loss1  
 
 	def full_sort_predict(self, interaction):
 		user = interaction[0]
@@ -413,139 +383,3 @@ class WaveRec(GeneralRecommender):
 		return scores
 
 
-
-class VisualModalExpertNetwork(nn.Module):  
-	def __init__(self, in_features):  
-		'''  
-		in_features :param in_features: visual features  
-		Usage:  
-			in_features = 4096  
-			network = VisualModalExpertNetwork(in_features)  
-			x = torch.randn(7050, 4096)  
-			output = network(x)  
-			print(output.shape)  # [7050, 64]  # Note: The final output shape will be [7050, 64] not [7050, 4096]  
-		'''  
-		super(VisualModalExpertNetwork, self).__init__()  
-		self.in_features = in_features  
-  
-		self.build_visual_modal_expert_network()  
-		self.init_weights()  # Initialize weights using Xavier Uniform  
-  
-	def build_visual_modal_expert_network(self):  
-		'''  
-		build a visual modal expert network  
-		'''  
-		self.visual_model_expert_network = nn.Sequential(  
-			# Downsampling  
-			nn.BatchNorm1d(self.in_features),  
-			nn.Linear(in_features=self.in_features, out_features=1024),  
-			nn.BatchNorm1d(1024),  
-			nn.ReLU(),  
-			nn.Dropout(),  
-  
-			nn.Linear(in_features=1024, out_features=512),  
-			nn.BatchNorm1d(512),  
-			nn.ReLU(),  
-			nn.Dropout(),  
-  
-			nn.Linear(in_features=512, out_features=64),  
-			nn.BatchNorm1d(64),  
-			nn.ReLU(),  
-			nn.Dropout()  
-
-		)  
-  
-	def init_weights(self):  
-		'''  
-		Initialize the weights of the network using Xavier Uniform initialization  
-		'''  
-		for m in self.modules():  
-			if isinstance(m, nn.Linear):  
-				nn.init.xavier_uniform_(m.weight)  
-				if m.bias is not None:  
-					nn.init.zeros_(m.bias)  
-  
-	def forward(self, x):  
-		'''  
-		forward:  
-		:param x: visual features ,[7050, 4096]  
-		:return: [7050, 64]  # Note: The final output shape will be [7050, 64] not [7050, 4096]  
-		'''  
-		return self.visual_model_expert_network(x) 
-  
-class TextModalExpertNetwork(nn.Module):  
-	def __init__(self, in_features):  
-		'''  
-		in_features :param in_features: visual features  
-		Usage:  
-			in_features = 4096  
-			network = VisualModalExpertNetwork(in_features)  
-			x = torch.randn(7050, 4096)  
-			output = network(x)  
-			print(output.shape)  # [7050, 64]  # Note: The output shape will be [7050, 64] not [7050, 4096]  
-		'''  
-		super(TextModalExpertNetwork, self).__init__()  
-  
-		self.in_features = in_features  
-  
-		self.build_text_modal_expert_network()  
-		  
-		# Initialize weights using Xavier Uniform  
-		self.init_weights()  
-  
-	def build_text_modal_expert_network(self):  
-		'''  
-			build a text modal expert network  
-		'''  
-		self.text_model_expert_network = nn.Sequential(  
-			# Downsampling  
-			nn.BatchNorm1d(self.in_features),  
-			nn.Linear(in_features=self.in_features, out_features=256),  
-			nn.BatchNorm1d(256),  
-			nn.ReLU(),  
-			nn.Dropout(),  
-			nn.Linear(in_features=256, out_features=128),  
-			nn.BatchNorm1d(128),  
-			nn.ReLU(),  
-			nn.Dropout(),  
-			nn.Linear(in_features=128, out_features=64),  
-			nn.BatchNorm1d(64),  
-			nn.ReLU(),  
-			nn.Dropout()  
-
-		)  
-  
-	def init_weights(self):  
-		'''  
-		Initialize the weights of the network using Xavier Uniform initialization  
-		'''  
-		for m in self.modules():  
-			if isinstance(m, nn.Linear):  
-				nn.init.xavier_uniform_(m.weight)  
-				if m.bias is not None:  
-					nn.init.zeros_(m.bias)  
-  
-	def forward(self, x):  
-		'''  
-		forward:  
-		:param x: text features ,[7050, 4096]  
-		:return: [7050, 64]  # Note: The return shape is [7050, 64] as per the defined network  
-		'''  
-		return self.text_model_expert_network(x)  
-
-
-
-def denoise_norm(emb1, weight=0.1):
-	'''
-		embedding denoise function
-	'''
-	# 核范数降噪
-	# print("weight:", weight, "weight.item:", weight.item())
-	# weight = weight.cuda()
-	nuclear_norm_emb1= torch.linalg.svdvals(emb1).sum()
-
-	# 可以根据需要调整核范数的权重
-	# print("emb1.device:", emb1.device, "weight.device:", weight.device, "nuclear_norm_emb1:", nuclear_norm_emb1.device)
-	emb1_norm = emb1 - weight * nuclear_norm_emb1
-
-	return emb1_norm
